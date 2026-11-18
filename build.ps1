@@ -26,14 +26,15 @@ $TextExtensions = ".ps1", ".js", ".mjs", ".json", ".md", ".yml", ".yaml", ".html
 
 # Short summary on screen; every detail goes to the log file.
 New-Item -ItemType Directory -Force .logs | Out-Null
-$LogPath = ".logs/build-{0:yyyyMMdd-HHmmss-fff}.log" -f (Get-Date).ToUniversalTime()
+$LogName = ".logs/build-{0:yyyyMMdd-HHmmss-fff}.log" -f (Get-Date).ToUniversalTime()   # shown to people
+$LogPath = Join-Path $PSScriptRoot $LogName   # written by full path, wherever the script is working
 $Timer = [System.Diagnostics.Stopwatch]::StartNew()
 function Write-Log([string[]] $Lines) { Add-Content -Path $LogPath -Value $Lines -Encoding utf8NoBOM }
 function Ok([string] $Message) { Write-Host "ok    $Message"; Write-Log "ok    $Message" }
 function Fail([string] $Message, [string] $Fix) {
   Write-Host "FAIL  $Message"
   if ($Fix) { Write-Host "      Fix: $Fix" }
-  Write-Host "      Full log: $LogPath"
+  Write-Host "      Full log: $LogName"
   Write-Log "FAIL  $Message", "      Fix: $Fix"
   exit 1   # a non-zero exit code: people, agents and CI all see that it failed
 }
@@ -160,7 +161,7 @@ function Get-RestorePoints {
     ForEach-Object { [pscustomobject]@{ Tag = $_; Sha = (Invoke-Git @("rev-list", "-n", "1", $_)) -join "" } }
 }
 function Done([string] $What) {
-  $msg = "{0} in {1:0.0} s | full log: {2}" -f $What, $Timer.Elapsed.TotalSeconds, $LogPath
+  $msg = "{0} in {1:0.0} s | full log: {2}" -f $What, $Timer.Elapsed.TotalSeconds, $LogName
   Write-Host $msg; Write-Log $msg; exit 0
 }
 
