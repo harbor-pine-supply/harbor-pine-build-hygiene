@@ -76,8 +76,11 @@ function Test-Encoding {
     $bytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $f))
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { Fail "encoding: $f starts with a UTF-8 byte-order mark (BOM)" "save it as UTF-8 without BOM" }
     if ($bytes.Length -ge 2 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF))) { Fail "encoding: $f is UTF-16, not UTF-8" "save it as UTF-8 without BOM" }
-    if ([Array]::IndexOf($bytes, [byte]13) -ge 0) { Fail "line endings: $f has Windows (CRLF) line endings" "check .gitattributes (eol=lf), then git add --renormalize ." }
   }
+  # Line endings: what Git has committed (the index), the same on every machine. A Windows working
+  # copy can hold CRLF that .gitattributes turns into LF on commit, so the files on disk aren't checked.
+  $crlf = @(@(Invoke-Git @("ls-files", "--eol")) | Where-Object { $_ -match '^i/(crlf|mixed)\s' })
+  if ($crlf.Count) { Fail "line endings: $(($crlf[0] -split "`t")[-1]) is committed with Windows (CRLF) line endings" "check .gitattributes (eol=lf), then git add --renormalize ." }
   Ok "encoding: $($files.Count) text files, UTF-8 without BOM, LF line endings"
 }
 function Test-Secrets {
