@@ -1,0 +1,15 @@
+# Started from GitHub's Node template (trimmed for the demo)
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+
+# Agent scratch notes and build logs (throwaway)
+.scratch/
+.logs/
+
+# Editor: keep shared settings only
+.vscode/*
+!.vscode/settings.json
