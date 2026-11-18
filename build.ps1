@@ -8,17 +8,21 @@
   ./build.ps1                    # check: pre-flight checks, lint, tests, build
   ./build.ps1 deploy -DryRun     # show what a deploy would do, change nothing
   ./build.ps1 deploy             # restore-point tag, deploy, health check
-  ./build.ps1 rollback           # redeploy the previous restore point
+  ./build.ps1 rollback           # redeploy the restore point before the live one
+  ./build.ps1 rollback -To deploy-20261118-185604   # redeploy a named restore point
   From bash, CI or an agent: pwsh -File ./build.ps1 [command]
 #>
 [CmdletBinding()]
 param(
   [ValidateSet("check", "deploy", "rollback")] [string] $Command = "check",
-  [switch] $DryRun
+  [switch] $DryRun,
+  [string] $To   # rollback only: the restore-point tag to go back to
 )
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
+# Read and write tool output as UTF-8 on every machine (Windows consoles default to an older code page).
+$OutputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 
 $SiteUrl = "https://harbor-pine-supply.github.io/harbor-pine-build-hygiene"
 $HealthTimeoutSeconds = 300
@@ -46,7 +50,12 @@ function Invoke-Logged([string] $Exe, [string[]] $ArgList) {
   Write-Log $out
   [pscustomobject]@{ Code = $code; Out = @($out) }
 }
-function Invoke-Git([string[]] $ArgList) { (Invoke-Logged git $ArgList).Out }
+# Git commands must succeed; the few that may fail use Invoke-Logged directly and check .Code.
+function Invoke-Git([string[]] $ArgList) {
+  $r = Invoke-Logged git $ArgList
+  if ($r.Code -ne 0) { Fail "git $($ArgList[0]) failed (exit code $($r.Code))" "see the log" }
+  $r.Out
+}
 
 Write-Log "build.ps1 $Command$(if ($DryRun) { ' -DryRun' }) at $((Get-Date).ToUniversalTime().ToString('u'))"
 
@@ -54,7 +63,8 @@ Write-Log "build.ps1 $Command$(if ($DryRun) { ' -DryRun' }) at $((Get-Date).ToUn
 function Test-Tools {
   $pinned = (Get-Content .node-version -Raw).Trim()
   $node = (Invoke-Logged node @("--version")).Out[0]
-  if ($node -notmatch "^v$([regex]::Escape($pinned))\.") {
+  # "22" pins the major version; "22.15.0" pins an exact version.
+  if ($node -notmatch "^v$([regex]::Escape($pinned))(\.|$)") {
     Fail "tools: Node $node, but .node-version pins $pinned" "install Node $pinned (the version in .node-version)"
   }
   Ok "tools: PowerShell $($PSVersionTable.PSVersion), Node $node (pinned $pinned)"
@@ -77,17 +87,20 @@ function Test-Encoding {
     $bytes = [IO.File]::ReadAllBytes((Join-Path $PSScriptRoot $f))
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) { Fail "encoding: $f starts with a UTF-8 byte-order mark (BOM)" "save it as UTF-8 without BOM" }
     if ($bytes.Length -ge 2 -and (($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) -or ($bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF))) { Fail "encoding: $f is UTF-16, not UTF-8" "save it as UTF-8 without BOM" }
+    try { $null = [Text.UTF8Encoding]::new($false, $true).GetString($bytes) } catch { Fail "encoding: $f isn't valid UTF-8" "save it as UTF-8 without BOM" }
   }
   # Line endings: what Git has committed (the index), the same on every machine. A Windows working
   # copy can hold CRLF that .gitattributes turns into LF on commit, so the files on disk aren't checked.
   $crlf = @(@(Invoke-Git @("ls-files", "--eol")) | Where-Object { $_ -match '^i/(crlf|mixed)\s' })
   if ($crlf.Count) { Fail "line endings: $(($crlf[0] -split "`t")[-1]) is committed with Windows (CRLF) line endings" "check .gitattributes (eol=lf), then git add --renormalize ." }
-  Ok "encoding: $($files.Count) text files, UTF-8 without BOM, LF line endings"
+  Ok "encoding: $($files.Count) text files, UTF-8 without BOM, LF line endings"   # text files = the extensions in $TextExtensions
 }
 function Test-Secrets {
   $tracked = @(@(Invoke-Git @("ls-files")) | Where-Object { $_ -match '(^|/)\.env' -and $_ -notmatch '\.example$' })
   if ($tracked) { Fail "secrets: $($tracked -join ', ') is tracked by Git" "git rm --cached <file>, keep it in .gitignore, and rotate anything it held" }
-  $pattern = '(?i)(password|passwd|secret|api[_-]?key|access[_-]?key|accountkey)\s*[:=]\s*["'']?[^\s"''<>{}$]{8,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
+  # A backstop, not a scanner: a quoted literal assigned to a secret-like name, an account key in a
+  # connection string, or a private key block. Reading a value from the environment doesn't match.
+  $pattern = '(?i)(password|passwd|secret|api[_-]?key|access[_-]?key)\s*[:=]\s*["''][^"''\s]{8,}["'']|accountkey=[A-Za-z0-9+/=]{16,}|-----BEGIN [A-Z ]*PRIVATE KEY-----'
   $files = @(Get-TextFiles)
   foreach ($f in $files) {
     $n = 0
@@ -114,6 +127,7 @@ function Build-Site([string] $Sha) {
   Remove-Item -Recurse -Force dist -ErrorAction Ignore
   New-Item -ItemType Directory dist | Out-Null
   $html = (Invoke-Git @("show", "${Sha}:site/index.html")) -join "`n"
+  if ($html -notmatch '\{\{VERSION\}\}') { Fail "build: site/index.html at $($Sha.Substring(0, 7)) has no {{VERSION}} placeholder" "the health check needs the version on the page" }
   Set-Content dist/index.html ($html.Replace("{{VERSION}}", $Sha.Substring(0, 7))) -Encoding utf8NoBOM -NoNewline
   Set-Content dist/version.txt $Sha -Encoding utf8NoBOM
 }
@@ -153,7 +167,7 @@ function Wait-Healthy([string] $Sha) {
     if ($live -eq $Sha) { Ok "health check: $SiteUrl/ serves $($Sha.Substring(0, 7)) (after $([int]($Timer.Elapsed.TotalSeconds - $start)) s)"; return }
     Start-Sleep -Seconds 10
   }
-  Fail "health check: the site doesn't serve $($Sha.Substring(0, 7)) after $HealthTimeoutSeconds s (live: '$live')" "./build.ps1 rollback"
+  Fail "health check: the site doesn't serve $($Sha.Substring(0, 7)) after $HealthTimeoutSeconds s (live: '$live')" "if the live version is the previous one, nothing broke: fix and deploy again; if it's broken, ./build.ps1 rollback -To <restore-point tag>"
 }
 function Get-RestorePoints {
   Invoke-Logged git @("fetch", "-q", "--tags", "origin") | Out-Null
@@ -186,7 +200,7 @@ switch ($Command) {
       Write-Host "plan  live now: $(if ($live) { $live.Substring(0, 7) } else { 'nothing' }) -> deploy $($sha.Substring(0, 7))"
       Write-Host "plan  restore-point tag $tag on $($sha.Substring(0, 7)), pushed to origin"
       Write-Host "plan  publish dist/ to the gh-pages branch, then check $SiteUrl/version.txt"
-      Done "DRY RUN  nothing was changed"
+      Done "DRY RUN  nothing tagged, published or pushed"
     }
     Invoke-Logged git @("tag", "-a", $tag, "-m", "Restore point: deployed $sha") | Out-Null
     if ((Invoke-Logged git @("push", "-q", "origin", $tag)).Code -ne 0) { Fail "deploy: couldn't push the restore-point tag $tag" "see the log" }
@@ -200,15 +214,24 @@ switch ($Command) {
   "rollback" {
     $live = Get-LiveVersion
     $points = @(Get-RestorePoints)
-    $i = [Array]::FindIndex([object[]]$points, [Predicate[object]] { param($p) $p.Sha -eq $live })
-    if ($i -lt 0) { Fail "rollback: the live version '$live' isn't a restore point" "check the site, then deploy a known tag" }
-    $target = $points | Select-Object -Skip ($i + 1) | Where-Object { $_.Sha -ne $live } | Select-Object -First 1
-    if (-not $target) { Fail "rollback: no restore point before $($points[$i].Tag)" "nothing older to roll back to" }
-    if ($DryRun) {
-      Write-Host "plan  live now: $($live.Substring(0, 7)) ($($points[$i].Tag)) -> roll back to $($target.Sha.Substring(0, 7)) ($($target.Tag))"
-      Done "DRY RUN  nothing was changed"
+    if ($To) {
+      # An explicit target: works even when the live site is down or serves something unknown.
+      $target = $points | Where-Object { $_.Tag -eq $To } | Select-Object -First 1
+      if (-not $target) { Fail "rollback: there's no restore point called $To" "git tag --list 'deploy-*'" }
+      $from = if ($live) { $live.Substring(0, [Math]::Min(7, $live.Length)) } else { "nothing" }
+    } else {
+      # The default: the restore point before the one that's live now.
+      $i = [Array]::FindIndex([object[]]$points, [Predicate[object]] { param($p) $p.Sha -eq $live })
+      if ($i -lt 0) { Fail "rollback: the live version '$live' isn't a restore point" "name one: ./build.ps1 rollback -To <tag> (git tag --list 'deploy-*')" }
+      $target = $points | Select-Object -Skip ($i + 1) | Where-Object { $_.Sha -ne $live } | Select-Object -First 1
+      if (-not $target) { Fail "rollback: no restore point before $($points[$i].Tag)" "nothing older to roll back to" }
+      $from = "$($live.Substring(0, 7)) ($($points[$i].Tag))"
     }
-    Ok "rollback: $($points[$i].Tag) ($($live.Substring(0, 7))) -> $($target.Tag) ($($target.Sha.Substring(0, 7)))"
+    if ($DryRun) {
+      Write-Host "plan  live now: $from -> roll back to $($target.Sha.Substring(0, 7)) ($($target.Tag))"
+      Done "DRY RUN  nothing published or pushed"
+    }
+    Ok "rollback: $from -> $($target.Tag) ($($target.Sha.Substring(0, 7)))"
     Build-Site $target.Sha
     Publish-Site $target.Sha
     Ok "published $($target.Sha.Substring(0, 7)) to gh-pages"
