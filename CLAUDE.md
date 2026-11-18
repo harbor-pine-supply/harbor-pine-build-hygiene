@@ -4,3 +4,11 @@
 - This project uses PowerShell 7 (`pwsh`). Write scripts as `.ps1`, never `.sh` or `.bat`.
 - Use PowerShell 7 syntax. Windows PowerShell 5.1 isn't supported.
 - Check everything with `pwsh -File ./build.ps1`. It exits non-zero when anything fails.
+
+## Where things go
+- Code in `src/`, tests in `test/`, the page in `site/`. One check: `pwsh -File ./build.ps1`.
+- Plans: `docs/plans/YYYY-MM-DD-<topic>.md`, written before the code.
+- Decisions: `docs/decisions/YYYY-MM-DD-<topic>.md`: what we decided and why. Don't rewrite an old one; add a new one that replaces it.
+- Handoffs: `docs/handoffs/YYYY-MM-DD-<package>.md`, at the end of a session.
+- Your working notes: `.scratch/` (ignored, throwaway). Anything worth keeping moves to `docs/`.
+- Never put secrets or customer data in any of these.
