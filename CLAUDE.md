@@ -12,3 +12,7 @@
 - Handoffs: `docs/handoffs/YYYY-MM-DD-<package>.md`, at the end of a session.
 - Your working notes: `.scratch/` (ignored, throwaway). Anything worth keeping moves to `docs/`.
 - Never put secrets or customer data in any of these.
+
+## Build script
+- Run `pwsh -File ./build.ps1` before you say anything is done. Exit code 0 means it passed.
+- It prints one line per check. On FAIL, the line says what failed and how to fix it, and the full log is in `.logs/`. Open the log only when you need the detail.
